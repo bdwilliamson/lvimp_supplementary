@@ -16,12 +16,9 @@ library("rprojroot")
 this_path <- normalizePath(".", mustWork = FALSE)
 proj_root <- rprojroot::find_root_file(criterion = ".projectile", path = this_path)
 
-# source(here::here("sims", "gen_data.R"))
 source(paste0(proj_root, "/code/sims/gen_data.R"))
 source(paste0(proj_root, "/code/sims/investigate_cross_sectional_performance_once.R"))
 source(paste0(proj_root, "/code/sims/utils.R"))
-# source(here::here("sims", "investigate_cross_sectional_performance_once.R"))
-# source(here::here("sims", "utils.R"))
 # set up args ------------------------------------------------------------------
 parser <- OptionParser()
 parser <- add_option(parser, "--outcome-type", default = "binary",
@@ -29,10 +26,10 @@ parser <- add_option(parser, "--outcome-type", default = "binary",
 parser <- add_option(parser, "--cor-between", type = "numeric", default = 0,
                      help = "Between-feature correlation")
 parser <- add_option(parser, "--cor-within", 
-                     type = "numeric", default = 0, 
+                     type = "numeric", default = 0.5, 
                      help = "Within-feature correlation")
 parser <- add_option(parser, "--n", type = "integer", 
-                     default = 500, help = "The sample size")
+                     default = 5000, help = "The sample size")
 parser <- add_option(parser, "--p", type = "integer", 
                      default = 10, help = "The number of features")
 parser <- add_option(parser, "--num-timepoints", type = "integer", default = 4,
@@ -47,12 +44,15 @@ parser <- add_option(parser, "--run-leave-out", type = "integer", default = 1,
                      help = "Should we run leave-out groups?")
 parser <- add_option(parser, "--run-add-in", type = "integer", default = 1,
                      help = "Should we run add-in groups?")
-parser <- add_option(parser, "--simple-model", default = 0, 
+parser <- add_option(parser, "--simple-model", default = 1, 
                      help = "Should we run simple procedures only?")
+parser <- add_option(parser, "--metrics", default = "auc;ppv;sensitivity",
+                     help = "The prediction performance metrics to use. Semicolon-separated.")
+parser <- add_option(parser, "--dgm", default = 2, 
+                     help = "The data-generating mechanism")
 args <- parse_args(parser, convert_hyphens_to_underscores = TRUE)
 print(args)
 
-# output_dir <- here::here("..", "..", "results", "sims")
 output_dir <- paste0(proj_root, "/results/sims/")
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -82,10 +82,19 @@ if (args$n == 1e4) {
 # set up the effect sizes
 timepoints <- seq_len(args$num_timepoints) - 1
 confounder_beta <- c(0.05, 0.05, 0.05, .05)
-beta_01 <- rep(2, args$num_timepoints)
-beta_02 <- 2 + timepoints / 4
-beta_03 <- (-1) * (1 + exp((-1) * timepoints))^(-1) + 2
-beta_0c <- rep(0.05, args$num_timepoints)
+if (args$dgm == 1) {
+  beta_01 <- rep(2, args$num_timepoints)
+  beta_02 <- 2 + timepoints / 4
+  beta_03 <- (-1) * (1 + exp((-1) * timepoints))^(-1) + 2
+  beta_0c <- rep(0.05, args$num_timepoints)
+} else {
+  const <- 0.1
+  beta_01 <- rep(const, args$num_timepoints)
+  beta_02 <- const + timepoints / 15
+  beta_03 <- (-1/4) * (1 + exp((-1) * timepoints))^(-1) + const
+  beta_0c <- rep(0.01, args$num_timepoints)
+  
+}
 beta_0 <- lapply(as.list(seq_len(args$num_timepoints)), function(t) {
   matrix(c(beta_01[t], beta_02[t], beta_03[t], rep(beta_0c[t], 4), rep(0, args$p - 7)))
 })
@@ -111,6 +120,7 @@ if (args$run_leave_out) {
   varsets <- c(varsets, loco_varsets)
   vim_types <- c(vim_types, rep(list("loco"), length(loco_varsets)))
 }
+metrics <- unlist(strsplit(args$metrics, ";"))
 
 # set up the SL library
 num_cores <- parallel::detectCores()
@@ -161,7 +171,8 @@ for (i in seq_len(args$nreps_per_job)) {
     corr_between = args$cor_between, corr_within = args$cor_within,
     k_outer = k_outer, k_inner = k_inner,
     learners = learner_lib, varsets = varsets, vim_types = vim_types,
-    parallel = as.logical(args$parallel_cv), cl = cl
+    parallel = as.logical(args$parallel_cv), cl = cl, metrics = metrics,
+    dgm = args$dgm, cutoff_prob = 0.95
   )
   if ((i %% save_iter) == 0) {
     cat("Finished iteration ", i, "\n")
@@ -170,7 +181,8 @@ for (i in seq_len(args$nreps_per_job)) {
                                        "_cb_", args$cor_between,
                                        "_cw_", args$cor_within,
                                        "_ai_", args$run_add_in,
-                                       "_lo_", args$run_leave_out, "_interim.rds"))
+                                       "_lo_", args$run_leave_out, 
+                                       "_dgm_", args$dgm, "_interim.rds"))
   }
 }
 end <- Sys.time()
@@ -182,5 +194,6 @@ saveRDS(output, file = paste0(output_dir, "/output_", args$outcome_type,
                               "_cw_", args$cor_within, 
                               "_ai_", args$run_add_in,
                               "_lo_", args$run_leave_out,
+                              "_dgm_", args$dgm, 
                               "_id_", job_id, ".rds"))
 cat("Simulation complete!\n")

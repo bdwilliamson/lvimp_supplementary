@@ -11,6 +11,7 @@
 #' @param corr_within the within-variable correlation across time points
 #' @param outcome_corr_type type of outcome correlation (defaults to "none", can be "ar" or "glmm")
 #' @param confounder_beta the association between the confounders and the important variables
+#' @param dgm the data-generating mechanism (1 or 2)
 #' @return a tibble with the dataset
 gen_data <- function(n = 100, p = 10, outcome_type = "binary", T = 4,
                      beta_0 = lapply(as.list(seq_len(T)), function(t) {
@@ -18,10 +19,11 @@ gen_data <- function(n = 100, p = 10, outcome_type = "binary", T = 4,
                      }), 
                      corr_between = 0, corr_within = 0, 
                      outcome_corr_type = "none",
-                     confounder_beta = c(0.5, 0.25, 0.15)) {
+                     confounder_beta = c(0.5, 0.25, 0.15),
+                     dgm = 1) {
   # generate X -- this function returns a list of x matrices
   x <- gen_x(n = n, p = p, T = T, corr_between = corr_between, corr_within = corr_within,
-             confounder_beta = confounder_beta)
+             confounder_beta = confounder_beta, dgm = dgm)
   # generate Y
   if (grepl("glmm", outcome_corr_type, ignore.case = TRUE)) {
     # Y is based on a (G)LMM
@@ -42,16 +44,17 @@ gen_data <- function(n = 100, p = 10, outcome_type = "binary", T = 4,
     y <- lapply(seq_len(T), function(t) y_mat[, t])
   } else if (grepl("ar", outcome_corr_type, ignore.case = TRUE)) {
     # Y is based on an AR(1) model
-    y <- vector("list", length = T)
-    y[[1]] <- gen_timepoint_y(x = x[[1]], beta_0 = beta_0[[1]], outcome_type = outcome_type)
-    for (t in 2:T) {
-      y[[t]] <- gen_timepoint_y(x = x[[t]], beta_0 = beta_0[[t]], outcome_type = outcome_type,
-                                outcome_corr_type = outcome_corr_type, previous_x = x[[t - 1]])
-    }
+    # y <- vector("list", length = T)
+    # y[[1]] <- gen_timepoint_y(x = x[[1]], beta_0 = beta_0[[1]], outcome_type = outcome_type, dgm = dgm)
+    # for (t in 2:T) {
+    #   y[[t]] <- gen_timepoint_y(x = x[[t]], beta_0 = beta_0[[t]], outcome_type = outcome_type,
+    #                             outcome_corr_type = outcome_corr_type, previous_x = x[[t - 1]], dgm = dgm)
+    # }
+    y <- gen_ar_y(n = n, x = x, T = T, beta_0 = beta_0, dgm = dgm, rho = 0.3)
   } else {
     # Y is independent across time
     y <- lapply(seq_len(T), function(t) {
-      gen_timepoint_y(x = x[[t]], beta_0 = beta_0[[t]], outcome_type = outcome_type)
+      gen_timepoint_y(x = x[[t]], beta_0 = beta_0[[t]], outcome_type = outcome_type, dgm = dgm)
     })  
   }
   
@@ -63,6 +66,22 @@ gen_data <- function(n = 100, p = 10, outcome_type = "binary", T = 4,
   ))
   return(dataset)
 }
+gen_ar_y <- function(n = 100, x = list(), T = 4, beta_0 = list(), dgm = 2, rho = 0.3) {
+  linear_predictors <- lapply(1:length(x), function(t) {
+    as.matrix(x[[t]]) %*% beta_0[[t]] - ifelse(dgm == 2, 1, 0)
+  })
+  cov_mat <- matrix(nrow = T, ncol = T)
+  for (i in 1:T) {
+    for (j in 1:T) {
+      cov_mat[i,j] <- sqrt(rho) ^ abs(i - j)
+    }
+  }
+  errors <- mvtnorm::rmvnorm(n = n, mean = rep(0, T), sigma = cov_mat)
+  y <- lapply(1:length(x), function(t) {
+    as.numeric(linear_predictors[[t]] + errors[, t] > 0)
+  })
+  return(y)
+}
 
 #' @title Generate outcomes for a specific time point, given covariates
 #' 
@@ -71,23 +90,33 @@ gen_data <- function(n = 100, p = 10, outcome_type = "binary", T = 4,
 #' @param outcome_corr_type type of outcome correlation (defaults to "none", can be "ar" or "glmm")
 #' @param b a vector of random intercepts for GLMM correlation
 #' @param previous_x covariates from the previous timepoint for AR(1) correlation
+#' @param dgm the data-generating mechanism (1 vs 2)
 #' @return the time-specific outcomes
 gen_timepoint_y <- function(x = replicate(10, rnorm(100, 0, 1)), 
                             beta_0 = matrix(c(1, 1, 0.5, rep(.25, 4), 
                                               rep(0, ncol(x) - 7))), 
                             outcome_type = "binary",
                             outcome_corr_type = "none", b = rep(0, nrow(x)),
-                            previous_x = replicate(10, rnorm(100, 0, 1))) {
+                            previous_x = replicate(10, rnorm(100, 0, 1)),
+                            dgm = 2) {
   if (grepl("glmm", outcome_corr_type, ignore.case = TRUE)) {
     linear_predictor <- b + as.matrix(x) %*% beta_0
   } else if (grepl("ar", outcome_corr_type, ignore.case = TRUE)) {
-    linear_predictor <- as.matrix(previous_x) %*% beta_0
+    linear_predictor <- as.matrix(previous_x) %*% beta_0 +
+      ifelse(dgm == 2, -1, 0)
   } else {
-    linear_predictor <- as.matrix(x) %*% beta_0
+    linear_predictor <- as.matrix(x) %*% beta_0 + 
+      ifelse(dgm == 2, -1, 0)
   }
-  noisy_predictor <- linear_predictor + rnorm(n = nrow(x), mean = 0, sd = 1)  
+  noisy_predictor <- linear_predictor + rnorm(n = nrow(x), mean = 0, sd = 1)
+  # if (dgm == 1) {
+    bin_y <- as.numeric(noisy_predictor > 0)  
+  # } else {
+    # bin_y <- as.numeric(runif(length(linear_predictor)) < stats::plogis(linear_predictor))
+  # }
+  
   if (outcome_type == "binary") {
-    y <- as.numeric(noisy_predictor > 0)
+    y <- bin_y
   } else {
     y <- noisy_predictor
   }
@@ -112,12 +141,14 @@ gen_errors <- function(n = 100, mean = rep(0, n), r_between = chol(matrix(0, nro
 #' @param corr_between the between-variable correlation at a given timepoint
 #' @param corr_within the within-variable correlation across timepoints
 #' @param confounder_beta the association between the confounders and the important variables
+#' @param dgm the data-generating mechanism
 #' @return the time-specific features
 gen_x <- function(n = 100, p = 10, T = 4, corr_between = 0, corr_within = 0,
-                  confounder_beta = rep(0.05, 4)) {
+                  confounder_beta = rep(0.05, 4), dgm = 1) {
   # generate T matrices filled with noise variables (note variables 8:p are independent, no importance)
+  this_sd <- ifelse(dgm == 1, 1, 0.5)
   x <- lapply(as.list(seq_len(T)), function(t) {
-    data.frame(matrix(rnorm(n * p, mean = 0, sd = 1), nrow = n, ncol = p))
+    data.frame(matrix(rnorm(n * p, mean = 0, sd = this_sd), nrow = n, ncol = p))
   })
   # generate (X_4, X_5, X_6, X_7)_1 (confounders)
   sigma_between_confounders <- matrix(corr_between ^ 2, nrow = 4, ncol = 4)

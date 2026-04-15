@@ -28,3 +28,13 @@ for %%N in (100 250 500 1000 5000 10000) do (
     
     !scriptpath! investigate_cross_sectional_performance.R --outcome-type !outcome_type! --cor-between !B! --cor-within !W! --n %%N --p !p! --num-timepoints !num_timepoints! --nreps-total !nreps! --nreps-per-job !nreps! --simple-model !simple_model! 1>!this_outfile! 2>&1
 )
+
+:: run new metrics
+set simple_model=0
+:: loop over sample sizes
+for %%N in (100 1000 5000) do (
+    echo Running n = %%N, outcome = !outcome_type!, cor between = !B!, cor within = !W!
+    set this_outfile=!outdir!\output_!outcome_type!_cb_!B!_cw_!W!_n_%%N_simple_!simple_model!.out
+    
+    !scriptpath! investigate_cross_sectional_performance.R --outcome-type !outcome_type! --cor-between !B! --cor-within !W! --n %%N --p !p! --num-timepoints !num_timepoints! --nreps-total !nreps! --nreps-per-job !nreps! --simple-model !simple_model! 1>!this_outfile! 2>&1
+)

@@ -16,32 +16,41 @@
 #' @param k_inner the number of folds for inner cross-validation
 #' @param parallel should we run CV.SuperLearner in parallel?
 #' @param cl a cluster object (from parallel::makePSOCKcluster)
+#' @param metrics a vector of prediction metrics to use
+#' @param dgm the data-generating mechanism, either 1 or 2
+#' @param cutoff_prob the probability for predicted value cutoffs for measures like PPV, sensitivity
 #' @return a tibble with results
 investigate_cross_sectional_performance_once <- function(
-  mc_id = 1, n = 100, p = 10, outcome_type = "binary", T = 4, 
-  beta_0 = lapply(as.list(seq_len(args$num_timepoints)), function(t) {
-    matrix(c(1, 1 + (t - 1) / 4, (-1) * (1 + exp((-1) * (t - 1)))^(-1) + 1, rep(0.25, 4), rep(0, args$p - 7)))
-  }), confounder_beta = matrix(rep(0.05, 4)), corr_between = 0, corr_within = 0, 
-  outcome_corr_type = "none",
-  learners = "SL.glm", varsets = list(4:7), vim_types = "addi", k_outer = 10, k_inner = 10, 
-  parallel = TRUE, cl = cl
+    mc_id = 1, n = 100, p = 10, outcome_type = "binary", T = 4, 
+    beta_0 = lapply(as.list(seq_len(args$num_timepoints)), function(t) {
+      matrix(c(1, 1 + (t - 1) / 4, (-1) * (1 + exp((-1) * (t - 1)))^(-1) + 1, rep(0.25, 4), rep(0, args$p - 7)))
+    }), confounder_beta = matrix(rep(0.05, 4)), corr_between = 0, corr_within = 0, 
+    outcome_corr_type = "none",
+    learners = "SL.glm", varsets = list(4:7), vim_types = "addi", k_outer = 10, k_inner = 10, 
+    parallel = TRUE, cl = cl, metrics = "auc", dgm = 1, cutoff_prob = 0.95
 ) {
   # generate a dataset, in long format
   dataset <- gen_data(n = n, p = p, outcome_type = outcome_type, T = T,
                       beta_0 = beta_0, corr_between = corr_between, 
-                      corr_within = corr_within, confounder_beta = confounder_beta)
+                      corr_within = corr_within, confounder_beta = confounder_beta,
+                      dgm = dgm)
+  # if dgm == 2, use Phillips et al. (2023) to set k_inner
+  n_eff <- get_n_eff(n = n / k_outer, n_rare = floor(sum(dataset$y[dataset$t == 1]) / k_outer),
+                     outcome_type = outcome_type)
+  if (dgm == 2) {
+    k_inner <- setV(n.effective = n_eff)
+  }
   # estimate conditional means separately for each timepoint using CV.SuperLearner
   if (outcome_type == "binary") {
     sl_opts <- list("family" = "binomial", method = "method.CC_nloglik",
                     cvControl = list(V = k_outer, stratifyCV = TRUE),
-                    innerCvControl = list(V = k_inner, stratifyCV = TRUE))
-    measure_type <- "auc"
+                    innerCvControl = rep(list(list(V = k_inner, stratifyCV = TRUE)), k_outer))
   } else {
     sl_opts <- list("family" = "gaussian", method = "method.CC_LS",
                     cvControl = list(V = k_outer),
-                    innerCvControl = list(V = k_inner))
-    measure_type <- "average_value"
+                    innerCvControl = rep(list(list(V = k_inner)), k_outer))
   }
+  measure_type <- metrics
   unique_learners <- c(get_unique_learners(learners), "SL")
   cv_sls <- lapply(as.list(1:T), function(t) vector("list", length(varsets)))
   cv_folds <- vector("list", length = T)
@@ -63,14 +72,14 @@ investigate_cross_sectional_performance_once <- function(
         cv_sls[[i]][[j]] <- CV.SuperLearner(
           Y = this_y, X = as.matrix(this_x_df), SL.library = learners,
           family = sl_opts$family, method = sl_opts$method,
-          cvControl = sl_opts$cvControl, innerCvControl = list(sl_opts$innerCvControl),
+          cvControl = sl_opts$cvControl, innerCvControl = sl_opts$innerCvControl,
           parallel = cl
         ) 
       } else {
         cv_sls[[i]][[j]] <- CV.SuperLearner(
           Y = this_y, X = as.matrix(this_x_df), SL.library = learners,
           family = sl_opts$family, method = sl_opts$method,
-          cvControl = sl_opts$cvControl, innerCvControl = list(sl_opts$innerCvControl),
+          cvControl = sl_opts$cvControl, innerCvControl = sl_opts$innerCvControl,
           parallel = "seq"
         )
       }
@@ -112,8 +121,15 @@ investigate_cross_sectional_performance_once <- function(
       cv_pred_perf_confounders <- NA
       confounder_preds_list <- vector("list", length = length(unique_learners))
     } else {
-      cv_pred_perf_confounders <- get_all_predictiveness(sl_fit = cv_sls[[i]][[confounder_varset_index]],
-                                                         type = measure_type)
+      # cv_pred_perf_confounders <- get_all_predictiveness(sl_fit = cv_sls[[i]][[confounder_varset_index]],
+      #                                                    type = measure_type)
+      cv_pred_perf_confounders <- do.call(
+        rbind, lapply(as.list(metrics), function(measure_type) {
+          get_all_predictiveness(sl_fit = cv_sls[[i]][[confounder_varset_index]],
+                                 type = measure_type) %>% 
+            mutate(measure = measure_type)
+        })
+      )
       confounder_preds_list <- vector("list", length = length(unique_learners))
       # get best algorithm within each class
       for (k in 1:length(unique_learners)) {
@@ -129,8 +145,15 @@ investigate_cross_sectional_performance_once <- function(
       cv_pred_perf_all <- NA
       all_preds_list <- vector("list", length = length(unique_learners))
     } else {
-      cv_pred_perf_all <- get_all_predictiveness(sl_fit = cv_sls[[i]][[all_varset_index]],
-                                                 type = measure_type)
+      # cv_pred_perf_all <- get_all_predictiveness(sl_fit = cv_sls[[i]][[all_varset_index]],
+      #                                            type = measure_type)
+      cv_pred_perf_all <- do.call(
+        rbind, lapply(as.list(metrics), function(measure_type) {
+          get_all_predictiveness(sl_fit = cv_sls[[i]][[all_varset_index]],
+                                 type = measure_type) %>% 
+            mutate(measure = measure_type)
+        })
+      )
       all_preds_list <- vector("list", length = length(unique_learners))
       # get best algorithm within each class
       for (k in 1:length(unique_learners)) {
@@ -145,8 +168,15 @@ investigate_cross_sectional_performance_once <- function(
     for (j in non_confounder_all_varsets) {
       # get the predictions from the best algorithm within each class
       this_preds_list <- vector("list", length = length(unique_learners))
-      this_cv_pred_perf <- get_all_predictiveness(sl_fit = cv_sls[[i]][[j]],
-                                                  type = measure_type)
+      # this_cv_pred_perf <- get_all_predictiveness(sl_fit = cv_sls[[i]][[j]],
+      #                                             type = measure_type)
+      this_cv_pred_perf <- do.call(
+        rbind, lapply(as.list(metrics), function(measure_type) {
+          get_all_predictiveness(sl_fit = cv_sls[[i]][[j]],
+                                 type = measure_type) %>% 
+            mutate(measure = measure_type)
+        })
+      )
       for (k in 1:length(unique_learners)) {
         this_best_learner <- extract_best_learner(
           cv_sl = cv_sls[[i]][[j]], procedure = unique_learners[k],
@@ -163,52 +193,78 @@ investigate_cross_sectional_performance_once <- function(
         full_preds <- all_preds_list
         reduced_preds <- this_preds_list
       }
-      cv_vim_list[[i]][[which(j == non_confounder_all_varsets)]] <- lapply(as.list(1:length(unique_learners)), function(k) {
-        this_vim <- vimp::cv_vim(Y = this_y, X = this_x,
-                                 cross_fitted_f1 = full_preds[[k]],
-                                 cross_fitted_f2 = reduced_preds[[k]],
-                                 indx = varsets[[j]][!(varsets[[j]] %in% c(4, 5, 6, 7))],
-                                 type = measure_type,
-                                 cross_fitting_folds = cv_folds_vec,
-                                 sample_splitting_folds = ss_folds[[i]],
-                                 run_regression = FALSE,
-                                 alpha = 0.05, V = k_outer / 2, 
-                                 na.rm = TRUE)
-        this_alg_full <- names(this_preds_list)[k]
-        this_alg_reduced <- names(confounder_preds_list)[k]
-        tibble("full" = this_alg_full, "reduced" = this_alg_reduced, "vim" = this_vim)
+      cv_vim_list[[i]][[which(j == non_confounder_all_varsets)]] <- lapply(as.list(metrics), function(measure_type) {
+        lapply(as.list(1:length(unique_learners)), function(k) {
+          cutoff <- c(quantile(full_preds[[k]], cutoff_prob), quantile(reduced_preds[[k]], cutoff_prob))
+          reduced_nums <- unlist(sapply(1:k_outer, function(x) sum(reduced_preds[[k]][cv_folds_vec == x] >= cutoff[2])))
+          cutoff_prob_2 <- cutoff_prob - 0.05
+          # ensure that we have some folds with predictions above the threshold
+          while (sum(reduced_nums != 0) < (k_outer / 2)) {
+            cutoff[2] <- quantile(reduced_preds[[k]], cutoff_prob_2)
+            cutoff_prob_2 <- cutoff_prob_2 - 0.05
+            reduced_nums <- unlist(sapply(1:10, function(x) sum(reduced_preds[[k]][cv_folds_vec == x] >= cutoff[2])))
+          }
+          this_vim <- vimp::cv_vim(Y = this_y, X = this_x,
+                                   cross_fitted_f1 = full_preds[[k]],
+                                   cross_fitted_f2 = reduced_preds[[k]],
+                                   indx = varsets[[j]][!(varsets[[j]] %in% c(4, 5, 6, 7))],
+                                   type = measure_type,
+                                   cross_fitting_folds = cv_folds_vec,
+                                   sample_splitting_folds = ss_folds[[i]],
+                                   run_regression = FALSE,
+                                   alpha = 0.05, V = k_outer / 2, 
+                                   cutoff = cutoff,
+                                   na.rm = TRUE)
+          this_alg_full <- names(this_preds_list)[k]
+          this_alg_reduced <- names(confounder_preds_list)[k]
+          tibble("full" = this_alg_full, "reduced" = this_alg_reduced, "type" = measure_type, "vim" = this_vim)
+        })
       })
     }
   }
-  # reorganize the list to be in the order algorithm, variable set, timepoint
+  # reorganize the list to be in the order algorithm, variable set, timepoint 
   reordered_cv_vim_list <- vector("list", length = length(unique_learners))
   for (k in 1:length(unique_learners)) {
     reordered_cv_vim_list[[k]] <- vector("list", length = length(non_confounder_all_varsets))
     for (j in 1:(length(cv_vim_list[[1]]))) {
-      reordered_cv_vim_list[[k]][[j]] <- lapply(cv_vim_list, function(l) l[[j]][[k]])
+      reordered_cv_vim_list[[k]][[j]] <- vector("list", length = length(metrics))
+      for (m in 1:length(metrics)) {
+        reordered_cv_vim_list[[k]][[j]][[m]] <- lapply(cv_vim_list, function(l) l[[j]][[m]][[k]])  
+      }
     }
   }
   # estimate summaries of predictiveness, VIM for each algorithm and group of variables
-  lvim_list <- vector("list", length = length(unique_learners))
-  for (k in 1:length(unique_learners)) {
-    lvim_list[[k]] <- vector("list", length = length(non_confounder_all_varsets))
-    for (j in 1:length(reordered_cv_vim_list[[k]])) {
-      this_vim_list <- lapply(reordered_cv_vim_list[[k]][[j]], function(l) l$vim)
-      this_full_alg <- unlist(lapply(reordered_cv_vim_list[[k]][[j]], function(l) l$full[1]))
-      this_reduced_alg <- unlist(lapply(reordered_cv_vim_list[[k]][[j]], function(l) l$reduced[1]))
-      lvim_obj <- lvimp::lvim(this_vim_list, timepoints = 1:4)
-      lvim_list[[k]][[j]] <- lvimp::lvim_average(lvim_obj, indices = 1:4)
-      lvim_list[[k]][[j]] <- lvimp::lvim_trend(lvim_list[[k]][[j]], indices = 1:4)
-      lvim_list[[k]][[j]] <- lvimp::lvim_autc(lvim_list[[k]][[j]], indices = 1:4)
-    }
+  lvim_list <- vector("list", length = length(metrics))
+  for (m in 1:length(metrics)) {
+    lvim_list[[m]] <- vector("list", length = length(unique_learners))
+    for (k in 1:length(unique_learners)) {
+      lvim_list[[m]][[k]] <- vector("list", length = length(non_confounder_all_varsets))
+      for (j in 1:length(reordered_cv_vim_list[[k]])) {
+        this_vim_list <- lapply(reordered_cv_vim_list[[k]][[j]][[m]], function(l) l$vim)
+        this_full_alg <- unlist(lapply(reordered_cv_vim_list[[k]][[j]][[m]], function(l) l$full[1]))
+        this_reduced_alg <- unlist(lapply(reordered_cv_vim_list[[k]][[j]][[m]], function(l) l$reduced[1]))
+        this_type <- unlist(lapply(reordered_cv_vim_list[[k]][[j]][[m]], function(l) l$type[1]))
+        lvim_obj <- lvimp::lvim(this_vim_list, timepoints = 1:4)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_average(lvim_obj, indices = 1:4)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_trend(lvim_list[[m]][[k]][[j]], indices = 1:4)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_autc(lvim_list[[m]][[k]][[j]], indices = 1:4)  
+      }
+    }  
   }
   # return output!
   output <- cbind("mc_id" = mc_id, "n" = n, "p" = p, "outcome_type" = outcome_type, 
                   "corr_between" = corr_between, "corr_within" = corr_within,
+                  "dgm" = dgm,
                   data.table::rbindlist(
-                    lapply(as.list(1:length(unique_learners)), function(i) {
-                      collapse_sim_output(output_list = lvim_list[[i]], algo = unique_learners[i], varsets = varsets,
-                                          vim_types = vim_types)
+                    lapply(as.list(1:length(metrics)), function(m) {
+                      this_metric <- metrics[m]
+                      data.table::rbindlist(
+                        lapply(as.list(1:length(unique_learners)), function(i) {
+                          collapse_sim_output(output_list = lvim_list[[m]][[i]], algo = unique_learners[i], varsets = varsets,
+                                              vim_types = vim_types) %>% 
+                            mutate(measure = this_metric)
+                        })
+                      )  
                     })
                   ))
   return(output)

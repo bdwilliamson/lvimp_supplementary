@@ -1,5 +1,41 @@
 # useful functions for longitudinal variable importance simulations
 
+# setting the number of inner CV folds -----------------------------------------
+# get the effective sample size
+# @param n the sample size
+# @param n_rare the number of events in the minority class (if outcome_type == "binary")
+# @param outcome_type the type of outcome ("continuous" or "binary")
+# @return the effective sample size
+get_n_eff <- function(n = 100, n_rare = 100, outcome_type = "continuous") {
+  if (outcome_type == "continuous") {
+    n_eff <- n
+  } else {
+    n_eff <- min(n, 5 * n_rare)
+  }
+  return(n_eff)
+}
+
+# Set the number of cross-validation
+# folds as a function of n.effective
+# See Phillips 2023 doi.org/10.1093/ije/dyad023
+# @param n.effective the effective sample size
+# @return the number of CV folds for SL
+setV <- function(n.effective = 100) {
+  if (n.effective <= 30) {
+    V <- n.effective
+  } else if (n.effective <= 500) {
+    V <- 20
+  } else if (n.effective <= 1000) {
+    V <- 10
+  } else if (n.effective <= 10000) {
+    V <- 5
+  } else {
+    V <- 2
+  }
+  return(V)
+}
+
+
 # measuring prediction performance for each learner in CV.SL -------------------
 # get the CV-predictiveness for a single learner's predicted values
 #' @param preds the fitted values
@@ -25,6 +61,10 @@ one_predictiveness <- function(preds, Y, full_y = NULL, scale = "identity",
                     Z = NULL, type = "auc", ...) {
   if (type == "auc") {
     metric <- vimp::measure_auc
+  } else if (grepl("ppv", type)) {
+    metric <- vimp::measure_ppv
+  } else if (grepl("sens", type)) {
+    metric <- vimp::measure_sensitivity
   } else {
     metric <- vimp::measure_r_squared
   }
@@ -75,8 +115,8 @@ cv_predictiveness <- function(preds, Y, folds, scale = "identity",
       Z = Z[folds_z == v, , drop = FALSE], type = type, ...
     )
   })
-  est <- mean(unlist(lapply(ests_eifs, function(l) l$est)))
-  var <- mean(unlist(lapply(ests_eifs, function(l) mean(l$eif ^ 2))))
+  est <- mean(unlist(lapply(ests_eifs, function(l) l$est)), na.rm = TRUE)
+  var <- mean(unlist(lapply(ests_eifs, function(l) mean(l$eif ^ 2))), na.rm = TRUE)
   se <- sqrt(var / length(Y))
   ci <- vimp::vimp_ci(est, se, scale = scale, level = 0.95)
   return(list(est = est, se = se, ci = ci))
@@ -125,11 +165,13 @@ get_individual_predictiveness <- function(sl_fit, col, scale = "identity",
   if (any(is.na(sl_fit$library.predict[, col]))) {
     return(NULL)
   }
+  this_cutoff <- quantile(sl_fit$library.predict[, col], 0.95)
   alg_pred <- cv_predictiveness(
     preds = sl_fit$library.predict[, col], Y = sl_fit$Y,
     scale = scale,
     folds = sl_fit$folds, weights = weights,
-    C = C, Z = Z, type = type, ...
+    C = C, Z = Z, type = type, 
+    cutoff = this_cutoff, ...
   )
   # break apart algorithm and screen
   str <- colnames(sl_fit$library.predict)[col]
@@ -138,7 +180,8 @@ get_individual_predictiveness <- function(sl_fit, col, scale = "identity",
   data.frame(
     Learner = alg, Screen = screen, est = alg_pred$est,
     se = alg_pred$se,
-    ci_ll = alg_pred$ci[1], ci_ul = alg_pred$ci[2]
+    ci_ll = alg_pred$ci[1], ci_ul = alg_pred$ci[2],
+    cutoff = this_cutoff
   )
 }
 # get the CV-predictiveness for all learners fit with SL
@@ -163,29 +206,35 @@ get_all_predictiveness <- function(sl_fit, scale = "identity",
                          C = rep(1, length(sl_fit$Y)),
                          Z = NULL, type = "auc", ...) {
   # get the CV-AUC of the SuperLearner predictions
+  this_cutoff <- quantile(sl_fit$SL.predict, 0.95)
   sl_pred <- cv_predictiveness(
     preds = sl_fit$SL.predict, Y = sl_fit$Y,
     folds = sl_fit$folds,
-    scale = scale, weights = weights, C = C, Z = Z, type = type, ...
+    scale = scale, weights = weights, C = C, Z = Z, type = type, 
+    cutoff = this_cutoff, ...
   )
   out <- data.frame(
     Learner = "SL", Screen = "All", est = sl_pred$est,
-    se = sl_pred$se, ci_ll = sl_pred$ci[1], ci_ul = sl_pred$ci[2]
+    se = sl_pred$se, ci_ll = sl_pred$ci[1], ci_ul = sl_pred$ci[2],
+    cutoff = this_cutoff
   )
   
   # Get the CV-auc of the Discrete SuperLearner predictions
+  this_cutoff <- quantile(sl_fit$discreteSL.predict, 0.95)
   discrete_sl_pred <- cv_predictiveness(
     preds = sl_fit$discreteSL.predict, Y = sl_fit$Y,
     folds = sl_fit$folds, scale = scale,
     weights = weights, C = C,
-    Z = Z, type = type, ...
+    Z = Z, type = type, 
+    cutoff = this_cutoff, ...
   )
   out <- rbind(out, data.frame(
     Learner = "Discrete SL", Screen = "All",
     est = discrete_sl_pred$est,
     se = discrete_sl_pred$se,
     ci_ll = discrete_sl_pred$ci[1],
-    ci_ul = discrete_sl_pred$ci[2]
+    ci_ul = discrete_sl_pred$ci[2],
+    cutoff = this_cutoff
   ))
   
   # Get the cvauc of the individual learners in the library
@@ -202,6 +251,18 @@ get_all_predictiveness <- function(sl_fit, scale = "identity",
     }
   )
   rbind(out, other_preds)
+}
+# fix table if not long enough (only happens for null set)
+fix_null_table <- function(cv_pred_perf_list, all_learners = "SL") {
+  tmp <- cv_pred_perf_list
+  missing_learners <- all_learners[unlist(lapply(as.list(all_learners), function(learner) !any(grepl(learner, cv_pred_perf_list$Learner))))]
+  tmp <- rbind.data.frame(
+    tmp, do.call(rbind, lapply(as.list(seq_len(length(missing_learners))), function(x) {
+      tmp[tmp$Learner == "SL.mean", ] %>% 
+        mutate(Learner = missing_learners[x])
+    }))
+  )
+  return(tmp)
 }
 # extract best learner of a given type from CV.SL object -----------------------
 #' @param learners a character vector specifying the different learners
@@ -224,14 +285,23 @@ get_unique_learners <- function(learners, unique_only = TRUE) {
 extract_best_learner <- function(cv_sl = NULL, procedure = "rf", prediction_performance = NULL) {
   all_learners <- get_unique_learners(prediction_performance$Learner, unique_only = FALSE)
   this_learner_perf <- prediction_performance[grepl(paste0("\\b", procedure, "\\b"), all_learners), ]
-  # get the name of the learner with the best prediction performance
-  best_learner <- this_learner_perf$Learner[which.max(this_learner_perf$est)]
+  # get the name of the learner with the best prediction performance; if multiple metrics, pick AUC
+  if (length(unique(this_learner_perf$measure)) > 1) {
+    best_learner <- this_learner_perf$Learner[which.max(this_learner_perf$est[this_learner_perf$measure == "auc"])] 
+  } else {
+    best_learner <- this_learner_perf$Learner[which.max(this_learner_perf$est)]
+  }
   all_algs <-  gsub("(.*)_\\w+", "\\1", colnames(cv_sl$library.predict))
   # return predictions from that learner
-  if (procedure != "SL") {
+  if (procedure != "SL" & procedure != "Discrete SL") {
     return(list("learner" = best_learner, "preds" = cv_sl$library.predict[, best_learner == all_algs]))  
   } else {
-    return(list("learner" = "SL", "preds" = cv_sl$SL.predict))
+    if (procedure == "SL") {
+      return(list("learner" = "SL", "preds" = cv_sl$SL.predict))
+    } else {
+      return(list("learner" = "SL", "preds" = cv_sl$discreteSL.predict))  
+    }
+    
   }
   
 }
@@ -241,8 +311,9 @@ extract_best_learner <- function(cv_sl = NULL, procedure = "rf", prediction_perf
 #' @param algo the algorithm used for estimation
 #' @param varsets the variable sets
 #' @param vim_types the VIM types
+#' @param metrics the predictiveness metrics
 #' @return a data.table with the correct output
-collapse_sim_output <- function(output_list, algo = "glm", varsets = list(4:7), vim_types = "addi") {
+collapse_sim_output <- function(output_list, algo = "glm", varsets = list(4:7), vim_types = "addi", metrics = "auc") {
   # extract point estimates, etc. of predictiveness over time for each variable set
   baseline_varset <- unlist(lapply(varsets, function(varset) length(setdiff(varset, 4:7)) == 0))
   all_varset <- unlist(lapply(varsets, function(varset) length(intersect(varset, 1:10)) == 10))
