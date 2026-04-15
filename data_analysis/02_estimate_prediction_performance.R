@@ -25,14 +25,17 @@ parser <- OptionParser()
 #                      help = "Should we run leave-out groups?")
 # parser <- add_option(parser, "--run-add-in", type = "integer", default = 1,
 #                      help = "Should we run add-in groups?")
+parser <- add_option(parser, "--run-sls", type = "integer", default = 0, 
+                     help = "should we run the SLs or not?")
 args <- parse_args(parser, convert_hyphens_to_underscores = TRUE)
 print(args)
 
-data_dir <- "G:/CTRHS/IMATS/Data/SRS3 IMATS data/"
-results_dir <- "G:/CTRHS/IMATS/Brian/longitudinal_vim/results/data_analysis/"
+data_dir <- "<the directory where the data are stored>"
+results_dir <- "<the directory where results are stored>"
 if (!dir.exists(results_dir)) {
   dir.create(results_dir, recursive = TRUE)
 }
+cutoff_prob <- 0.95
 
 # read in the dataset ----------------------------------------------------------
 analysis_dataset <- readRDS(paste0(data_dir, "imats_srs3_cohort_study_analysis_dataset.rds"))
@@ -131,7 +134,7 @@ k_inner <- k_outer
 sl_opts <- list("family" = "binomial", "method" = "method.CC_nloglik",
                 "cvControl" = list(V = k_outer, stratifyCV = TRUE),
                 "innerCvControl" = rep(list(list(V = k_inner, stratifyCV = TRUE)), k_outer))
-measure_type <- "auc"
+measure_type <- c("auc", "ppv", "sensitivity")
 
 # estimate prediction functions, performance for each variable set at each time point -----------------------------
 # set up parallelization
@@ -157,32 +160,42 @@ cv_pred_perf_list <- lapply(as.list(1:num_timepoints), function(t) vector("list"
 cv_vim_list <- vector("list", length = num_timepoints)
 
 # obtain CV SL for each timepoint and varset
-start <- Sys.time()
-for (i in seq_len(num_timepoints)) {
-  this_X <- X[analysis_dataset$timepoint == timepoints[i], ]
-  this_y <- y[analysis_dataset$timepoint == timepoints[i]]
-  set.seed(timepoint_seeds[i])
-  cv_folds[[i]] <- vimp::make_folds(this_y, V = k_outer, stratified = TRUE)
-  these_sl_opts <- sl_opts
-  for (j in seq_len(num_varsets)) {
-    if (!is.null(cv_folds[[i]])) {
-      these_sl_opts$cvControl$validRows <- make_cv_sl_folds(cv_folds[[i]])
+if (args$run_sls == 1) {
+  start <- Sys.time()
+  for (i in seq_len(num_timepoints)) {
+    this_X <- X[analysis_dataset$timepoint == timepoints[i], ]
+    this_y <- y[analysis_dataset$timepoint == timepoints[i]]
+    set.seed(timepoint_seeds[i])
+    cv_folds[[i]] <- vimp::make_folds(this_y, V = k_outer, stratified = TRUE)
+    these_sl_opts <- sl_opts
+    for (j in seq_len(num_varsets)) {
+      if (!is.null(cv_folds[[i]])) {
+        these_sl_opts$cvControl$validRows <- make_cv_sl_folds(cv_folds[[i]])
+      }
+      this_x_df <- this_X[, varsets[[j]]]
+      set.seed(varset_seeds[[i]][j])
+      cv_sls[[i]][[j]] <- CV.SuperLearner(
+        Y = this_y, X = as.matrix(this_x_df), SL.library = learner_lib,
+        family = these_sl_opts$family, method = these_sl_opts$method,
+        cvControl = these_sl_opts$cvControl, innerCvControl = these_sl_opts$innerCvControl,
+        parallel = cl
+      )
+      saveRDS(cv_sls[[i]][[j]], file = paste0(results_dir, "cv_sls_", i, "_", j, ".rds"))
     }
-    this_x_df <- this_X[, varsets[[j]]]
-    set.seed(varset_seeds[[i]][j])
-    cv_sls[[i]][[j]] <- CV.SuperLearner(
-      Y = this_y, X = as.matrix(this_x_df), SL.library = learner_lib,
-      family = these_sl_opts$family, method = these_sl_opts$method,
-      cvControl = these_sl_opts$cvControl, innerCvControl = these_sl_opts$innerCvControl,
-      parallel = cl
-    )
-    saveRDS(cv_sls[[i]][[j]], file = paste0(results_dir, "cv_sls_", i, "_", j, ".rds"))
+    saveRDS(cv_folds, file = paste0(results_dir, "cv_folds.rds"))
   }
-  saveRDS(cv_folds, file = paste0(results_dir, "cv_folds.rds"))
+  end <- Sys.time()
+  cat("Elapsed time: ", format(end - start), "\n")
+} else {
+  cv_folds <- readRDS(paste0(results_dir, "cv_folds.rds"))
+  cv_sls <- lapply(as.list(seq_len(num_timepoints)), function(i) {
+    lapply(as.list(seq_len(num_varsets)), function(j) {
+      readRDS(paste0(results_dir, "cv_sls_", i, "_", j, ".rds"))
+    })
+  })
 }
-end <- Sys.time()
-cat("Elapsed time: ", format(end - start), "\n")
 
+cutoffs <- vector("list", length = num_timepoints)
 # compute predictiveness, VIM for each variable set at each time point
 for (i in seq_len(num_timepoints)) {
   this_X <- X[analysis_dataset$timepoint == timepoints[i], ]
@@ -190,21 +203,37 @@ for (i in seq_len(num_timepoints)) {
   these_complete_obs <- is_complete_obs[analysis_dataset$timepoint == timepoints[i]]
   cv_folds_vec <- cv_folds[[i]]
   cv_vim_list[[i]] <- vector("list", length = num_varsets - 1)
-  cv_pred_perf_list[[i]][[1]] <- get_all_predictiveness(
-    sl_fit = cv_sls[[i]][[1]], type = measure_type,
-    complete_obs = these_complete_obs
+  # get cutoff for PPV, sensitivity: 95th percentile of predicted risk
+  # cutoff depends on the variable set and timepoint
+  cutoffs[[i]] <- lapply(as.list(seq_len(num_varsets)), function(j) {
+    quantile(cv_sls[[i]][[j]]$SL.predict, probs = cutoff_prob)
+  })
+  
+  cv_pred_perf_list[[i]][[1]] <- do.call(
+    rbind, lapply(as.list(measure_type), function(type) {
+      get_all_predictiveness(
+        sl_fit = cv_sls[[i]][[1]], type = type,
+        complete_obs = these_complete_obs
+        # , cutoff = unlist(cutoffs[[i]][[1]])
+      ) %>% 
+        mutate(measure = type)
+    })
   )
+    
   # fix for SL.glm not working for null set
-  if (nrow(cv_pred_perf_list[[i]][[1]]) != num_learners) {
-    tmp <- cv_pred_perf_list[[i]][[1]]
-    tmp <- rbind.data.frame(tmp, do.call(rbind.data.frame, rep(list(tmp[tmp$Learner == "SL.mean", ]), num_learners - nrow(tmp))))
-    missing_learners <- all_learners[unlist(lapply(as.list(all_learners), function(learner) !any(grepl(learner, cv_pred_perf_list[[i]][[1]]$Learner))))]
-    tmp$Learner <- c("SL", "Discrete SL", "SL.mean", missing_learners)  
-    cv_pred_perf_list[[i]][[1]] <- tmp
+  if (nrow(cv_pred_perf_list[[i]][[1]]) != (num_learners * length(measure_type))) {
+    cv_pred_perf_list[[i]][[1]] <- fix_null_table(cv_pred_perf_list[[i]][[1]], all_learners = all_learners)
   }
   for (j in 2:num_varsets) {
-    this_cv_pred_perf <- get_all_predictiveness(
-      sl_fit = cv_sls[[i]][[j]], type = measure_type, complete_obs = these_complete_obs
+    this_cv_pred_perf <- do.call(
+      rbind, lapply(as.list(measure_type), function(type) {
+        get_all_predictiveness(
+          sl_fit = cv_sls[[i]][[j]], type = type,
+          complete_obs = these_complete_obs
+          # , cutoff = unlist(cutoffs[[i]][[j]])
+        ) %>% 
+          mutate(measure = type)
+      })
     )
     cv_pred_perf_list[[i]][[j]] <- this_cv_pred_perf
     full_preds <- get_all_learner_preds(cv_sls[[i]][[j]], learners = unique_learners,
@@ -234,16 +263,19 @@ for (i in seq_len(num_timepoints)) {
     } else if (j %in% c(15, 16, 17)) {
       comp_indx <- j - 3
     }
-    reduced_predictiveness <- get_all_predictiveness(
-      sl_fit = cv_sls[[i]][[comp_indx]], type = measure_type, complete_obs = these_complete_obs
+    reduced_predictiveness <- do.call(
+      rbind, lapply(as.list(measure_type), function(type) {
+        get_all_predictiveness(
+          sl_fit = cv_sls[[i]][[comp_indx]], type = type,
+          complete_obs = these_complete_obs
+          # , cutoff = cutoffs[[i]][[comp_indx]]
+        ) %>% 
+          mutate(measure = type)
+      })
     )
     # fix for SL.glm not working for null set, other learners not working sometimes
-    if (nrow(reduced_predictiveness) != num_learners) {
-      tmp <- reduced_predictiveness
-      tmp <- rbind.data.frame(tmp, do.call(rbind.data.frame, rep(list(tmp[tmp$Learner == "SL.mean", ]), num_learners - nrow(tmp))))
-      missing_learners <- all_learners[unlist(lapply(as.list(all_learners), function(learner) !any(grepl(learner, reduced_predictiveness$Learner))))]
-      tmp$Learner <- c(reduced_predictiveness$Learner, missing_learners)  
-      reduced_predictiveness <- tmp
+    if (nrow(reduced_predictiveness) != (num_learners * length(measure_type))) {
+      reduced_predictiveness <- fix_null_table(reduced_predictiveness, all_learners = all_learners)
     }
     reduced_preds <- get_all_learner_preds(cv_sls[[i]][[comp_indx]], 
                                            learners = unique_learners,
@@ -258,19 +290,26 @@ for (i in seq_len(num_timepoints)) {
         }
       })
     }
-    cv_vim_list[[i]][[j - 1]] <- get_all_vims(
-      y = this_y, x = this_X, full_preds = full_preds, reduced_preds = reduced_preds,
-      var_set = varsets[[j]], measure_type = measure_type, cv_folds = cv_folds_vec,
-      ss_folds = ss_folds, alpha = 0.05, K = k_outer / 2, complete_obs = these_complete_obs
-    )
+    # a list of lists: with i, j, this is a list of measure types (auc, ppv, sensitivity)
+    # followed by a list of learners
+    cv_vim_list[[i]][[j - 1]] <- lapply(as.list(measure_type), function(type) {
+        get_all_vims(
+          y = this_y, x = this_X, full_preds = full_preds, reduced_preds = reduced_preds,
+          var_set = varsets[[j]], measure_type = type, cv_folds = cv_folds_vec,
+          ss_folds = ss_folds[[i]], alpha = 0.05, K = k_outer / 2, complete_obs = these_complete_obs,
+          cutoff_prob = cutoff_prob
+        )
+      })
   }
 }
-# reorganize the lists to be in the following order: algorithm, variable set, timepoint
+# reorganize the lists to be in the following order: algorithm, variable set, measure, timepoint
 reordered_cv_vim_list <- vector("list", length = num_unique_learners)
 for (k in seq_len(num_unique_learners)) {
   reordered_cv_vim_list[[k]] <- vector("list", length = num_varsets - 1)
   for (j in 1:length(cv_vim_list[[1]])) {
-    reordered_cv_vim_list[[k]][[j]] <- lapply(cv_vim_list, function(l) l[[j]][[k]])
+    for (m in 1:length(measure_type)) {
+      reordered_cv_vim_list[[k]][[j]][[m]] <- lapply(cv_vim_list, function(l) l[[j]][[m]][[k]]) 
+    }
   }
 }
 # just need to reorder to variable set, timepoint
@@ -280,14 +319,18 @@ for (j in 1:length(cv_pred_perf_list[[1]])) {
 }
 
 # estimate longitudinal summaries of predictiveness, VIM for each algo and group of variables
-lvim_list <- get_all_lvims(cv_vims = reordered_cv_vim_list, num_timepoints = num_timepoints)
+lvim_list <- get_all_lvims(cv_vims = reordered_cv_vim_list, num_timepoints = num_timepoints,
+                           metrics = measure_type)
 
 # finalize output and return ---------------------------------------------------
 output <- data.table::rbindlist(
-  lapply(as.list(seq_len(num_unique_learners)), function(i) {
-    collapse_output(output_list = lvim_list[[i]], algo = unique_learners[i],
-                        varsets = varsets, vim_types = rep("addi", length(varsets) - 1),
-                        baseline_vars = NULL, all_vars = varsets[[10]])
+  lapply(as.list(seq_len(length(measure_type))), function(j) {
+    data.table::rbindlist(lapply(as.list(seq_len(num_unique_learners)), function(i) {
+      collapse_output(output_list = lvim_list[[j]][[i]], algo = unique_learners[i],
+                      varsets = varsets, vim_types = rep("addi", length(varsets) - 1),
+                      baseline_vars = NULL, all_vars = varsets[[10]])
+    })) %>% 
+      mutate(metric = measure_type[j])
   })
 )
 saveRDS(output, file = paste0(results_dir, "lvim_output.rds"))

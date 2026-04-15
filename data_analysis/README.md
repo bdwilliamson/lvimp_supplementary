@@ -1,6 +1,6 @@
 # Analyzing the variable importance of predictors of suicide risk
 
-This file describes the data analysis conducted in ["Inference on summaries of a model-agnostic longitudinal variable importance trajectory with application to suicide prevention"](https://arxiv.org/abs/2311.01638) by Williamson, Moodie, Simon, Rossom, and Shortreed (_arXiv_, 2024+). All analyses were implemented in the freely available R programming language, specifically, R version 4.0.2 or later. All analyses use the R package `lvimp` version 0.0.0.9000 and R package `vimp` version 2.3.3. 
+This file describes the data analysis conducted in ["Inference on summaries of a model-agnostic longitudinal variable importance trajectory with application to suicide prevention"](https://arxiv.org/abs/2311.01638) by Williamson, Moodie, Simon, Rossom, and Shortreed (_Annals of Applied Statistics_, 2026). All analyses were implemented in the freely available R programming language, specifically, R version 4.0.2 or later. All analyses use the R package `lvimp` version 0.0.0.9000 and R package `vimp` version 2.3.3. 
 
 The datasets analyzed during this study are not publicly available because they contain detailed information from the electronic health records in the health systems participating in this study and are governed by Health Insurance Portability and Accountability Act (HIPAA). Data are, however, available from the authors upon reasonable request, with permission of all health systems involved and a fully executed data use agreement.
 

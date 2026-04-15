@@ -29,8 +29,8 @@ parser <- OptionParser()
 args <- parse_args(parser, convert_hyphens_to_underscores = TRUE)
 print(args)
 
-data_dir <- "G:/CTRHS/IMATS/Data/SRS3 IMATS data/"
-results_dir <- "G:/CTRHS/IMATS/Brian/longitudinal_vim/results/data_analysis/"
+data_dir <- "<the directory where the data are stored>"
+results_dir <- "<the directory where results are stored>"
 if (!dir.exists(results_dir)) {
   dir.create(results_dir, recursive = TRUE)
 }

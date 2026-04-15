@@ -10,8 +10,8 @@ library("huxtable")
 library("tidyr")
 
 # read in the dataset ----------------------------------------------------------
-data_dir <- "G:/CTRHS/IMATS/Data/SRS3 IMATS data/"
-results_dir <- "G:/CTRHS/IMATS/Brian/longitudinal_vim/results/data_analysis/"
+data_dir <- "<the directory where the data are stored>"
+results_dir <- "<the directory where the results are stored>"
 analysis_dataset <- readRDS(paste0(data_dir, "imats_srs3_cohort_study_analysis_dataset.rds"))
 
 # create tables with summary statistics ----------------------------------------
@@ -42,11 +42,8 @@ table_1_data <- analysis_dataset %>%
         phq8_fct = factor(cut(phq8_visit, breaks = c(-10, -1, 4, 10, 15, 20, 25), labels = c("Not measured", "0--4", "5--10", "11--15", "16--20", "21 or higher"))),
          age_fct = factor(cut(age, breaks = c(10, 17, 29, 44, 64, 200), labels = c("11--17", "18--29", "30--44", "45--64", "65 and older"))),
          sex_fct = factor(case_when(sex_f == 1 ~ "Female",
-                                    # sex_o == 1 ~ "Other sex",
                                     sex_u == 1 ~ "Unknown sex",
                                     sex_f == 0 & sex_o == 0 & sex_u == 0 ~ "Male"),
-                          # levels = c("Female", "Male", "Other sex", "Unknown sex"), # no "Other sex" in these data
-                          # labels = c("Female", "Male", "Other sex", "Unknown sex")),
                           levels = c("Female", "Male", "Unknown sex"),
                           labels = c("Female", "Male", "Unknown sex")),
          race_fct = factor(case_when(race_as == 1 ~ "Asian",
@@ -126,11 +123,8 @@ table_1_visit_process <- table_1_data %>%
   gtsummary::add_overall(col_label = "**Overall**\nN = {N}") %>%
   gtsummary::modify_footnote(stat_0 ~ NA,
                              stat_1 = NA, stat_2 = NA, stat_3 = NA, stat_4 = NA, stat_5 = NA, stat_6 = NA)
-  # gtsummary::modify_footnote(all_stat_cols() ~ "For categorical variables, we report n (%); for continuous variables, we report mean (SD).")
 # demographic variables
 table_1_demographics <- table_1_data %>% 
-  # select(timepoint, age_fct, census_flag, site_fct, sex_fct, income_fct, edu_fct, ins_fct) %>% 
-  # select(timepoint, age_fct, sex_fct, income_fct, edu_fct, ins_fct) %>%
   select(timepoint, age_fct, sex_fct) |> 
   gtsummary::tbl_summary(
     by = "timepoint",
@@ -141,12 +135,7 @@ table_1_demographics <- table_1_data %>%
     digits = all_continuous() ~ 1,
     label = list(
       age_fct ~ "Age in years",
-      # census_flag ~ "Census data available at visit?",
-      # site_fct ~ "MHRN site of patient",
       sex_fct ~ "Sex"
-      # income_fct ~ "Median neighborhood household income",
-      # edu_fct ~ "Percent of neighborhood with college degree",
-      # ins_fct ~ "Insurance coverage"
     )
   ) %>% 
   gtsummary::modify_header(all_stat_cols() ~ "**{level}**\nN = {n}") %>%
@@ -214,7 +203,6 @@ table_1_dx <- table_1_data %>%
 
 table_1_prior_self_harm <- table_1_data %>%
   select(timepoint, ends_with("tot_days_last12m_any")) %>%
-  # select(timepoint, starts_with("asa"), starts_with("lsa"), starts_with("osa"), starts_with("aip")) %>%
   select(timepoint, starts_with("asa")) |> 
   gtsummary::tbl_summary(
     by = "timepoint",
@@ -224,10 +212,7 @@ table_1_prior_self_harm <- table_1_data %>%
     ),
     digits = all_continuous() ~ 1,
     label = list(
-      asa_tot_days_last12m_any ~ "Prior self-harm" #,
-      # lsa_tot_days_last12m_any ~ "Lacerative violent suicide attempt",
-      # osa_tot_days_last12m_any ~ "Other violent suicide attempt",
-      # aip_tot_days_last12m_any ~ "Accidental injury or poisoning"
+      asa_tot_days_last12m_any ~ "Prior self-harm"
     )
   ) %>%
   gtsummary::modify_header(all_stat_cols() ~ "**{level}**\nN = {n}") %>%
@@ -279,7 +264,7 @@ table_1_event <- table_1_data %>%
   gtsummary::add_overall(col_label = "**Overall**\nN = {N}") %>%
   gtsummary::modify_footnote(stat_0 ~ NA, stat_1 = NA, stat_2 = NA, stat_3 = NA, stat_4 = NA, stat_5 = NA, stat_6 = NA) |> 
   gtsummary::modify_table_styling(columns = label, rows = label == "Suicide attempt", 
-                                  footnote = "Suicide attempt in the 90 days followin the mental health care visit.")
+                                  footnote = "Suicide attempt in the 90 days following the mental health care visit.")
 table_1_phq8 <- table_1_data |> 
   select(timepoint, phq8_fct) |> 
   gtsummary::tbl_summary(
@@ -348,11 +333,7 @@ flextable::save_as_docx(path = paste0(results_dir, "table_1_internal.docx"),
                         table_1_internal %>% gtsummary::as_flex_table())
 
 table_1 <- gtsummary::tbl_stack(
-  # list(table_1_event, table_1_demographics, table_1_race, table_1_phq_charlson,
-  #      table_1_dx, table_1_prior_self_harm, table_1_encounters),
-  list(table_1_event, table_1_demographics, table_1_prior_self_harm, table_1_phq9, table_1_phq8),
-  # group_header = c("Outcome", "Demographic\n variables", "Race and ethnicity\n variables", "PHQ and comorbidity\n variables",
-  #                  "Diagnosis\n variables", "Prior self-harm\n variables", "Encounter\n variables")
+   list(table_1_event, table_1_demographics, table_1_prior_self_harm, table_1_phq9, table_1_phq8),
   group_header = c("", "Demographic\n variables", "", "", "")
 ) %>% 
   as_gt() %>%
@@ -361,55 +342,13 @@ table_1 <- gtsummary::tbl_stack(
   tab_options(table.font.size = 2)
 table_1_latex <- as.character(table_1 %>% as_latex())
 # hack to get width to work
-# y <- unlist(strsplit(table_1_latex, "\n", perl = TRUE))
 y <- unlist(strsplit(table_1_latex, "\n\\\\"))
-# y2 <- gsub("\n", "\\\\\\\\", gsub("\nN", " \\\\\\\\ N", y))
 y2 <- y
 y2_header <- y2[5]
 y2_header_split <- unlist(strsplit(y2_header, "&"))
 y2_header_new <- gsub("\n", " \\\\newline ", y2_header_split)
-# y2_header_new[-1] <- paste0("p{0.68in}{", y2_header_new[-1])
-# y2_header_new[-c(1, length(y2_header_new))] <- paste0(y2_header_new[-c(1, length(y2_header_new))], "} ")
-# y2_header_new[length(y2_header_new)] <- gsub("\\\\", "} \\\\", y2_header_new[length(y2_header_new)], fixed = TRUE)
 y2[5] <- paste0(y2_header_new, collapse = "& ")
 y2[2] <- "begin{longtable}{p{1in}p{0.70in}p{0.68in}p{0.68in}p{0.68in}p{0.68in}p{0.68in}p{0.68in}p{0.68in}}"
 y3 <- c(y2[1:2], "caption{Cohort description for sample used to estimate variable importance in suicide attempt risk prediction models.}\\label{tab:table_1}\\\\", y2[3:length(y2)][-c(4:5)]) # -4,5 gets rid of a "midrule" and an empty row
 table_1_latex2 <- paste0(y3, collapse = "\n\\")
-# gt::gtsave(table_1, filename = paste0(results_dir, "table_1.tex"))
 write(table_1_latex2, paste0(results_dir, "table_1.tex"))
-#   as_kable_extra(format = "latex", booktabs = "TRUE", longtable = TRUE,
-#            caption = "Cohort description for sample used to estimate variable importance in suicide attempt risk prediction models\\label{tab:table_1}.", linesep = "") %>%
-#   kableExtra::kable_styling(font_size = 9, latex_options = c("repeat_header")) %>%
-#   kableExtra::footnote(general = "For categorical variables, we report n (%); for continuous variables, we report mean (SD).",
-#                            alphabet = c("At least one diagnosis in the past 12 months", "At least one injury, poisoning, or attempt in the past 12 months", "At least one encounter in the past 12 months"))
-# kableExtra::save_kable(table_1, file = paste0(results_dir, "table_1.tex"))
-
-  # as_hux_table() %>%
-  # huxtable::set_caption("Cohort description for sample used to estimate variable importance in suicide attempt risk prediction models\\label{tab:table_1}.") %>%
-  # huxtable::set_wrap(TRUE) %>%
-  # huxtable::set_width(1) %>%
-  # huxtable::set_col_width(c(0.15, 0.2, rep((1 - 0.15 - 0.2) / 7, 7))) %>%
-  # huxtable::set_tabular_environment("longtable")
-
-# cap <- attr(table_1, "caption")
-# table_1_latex <- table_1 %>% to_latex()
-# table_1_latex_tabular <- table_1 %>% to_latex(tabular_only = TRUE)
-# # hack to make it work
-# y <- unlist(strsplit(table_1_latex, split = "\n"))
-# j <- which(grepl("\\begin{table}", y, fixed = TRUE))[1]
-# j2 <- which(grepl("\\end{table}", y, fixed = TRUE))[1]
-# i <- which(grepl("\\begin{longtable}", y, fixed = TRUE))[1]
-# i2 <- which(grepl("\\end{longtable}", y, fixed = TRUE))[1]
-# y2 <- y
-# y2[j] <- y[i]
-# y2[i] <- ""
-# y2[j2] <- y[i2]
-# y2[j2] <- ""
-# # new_table_1_latex <- paste0(c(y[1:i], paste0("\\caption{", cap, "}"), y[(i+1):length(y)]), collapse = "\n")
-# new_table_1_latex <- y2
-
-# write(new_table_1_latex, file = paste0(results_dir, "table_1.tex"))
-  # as_gt() %>%
-  # opt_footnote_marks(marks = "letters") %>%
-  # tab_caption(caption = "Cohort description for sample used to estimate variable importance in suicide attempt risk prediction models\\label{tab:table_1}.")
-# gt::gtsave(table_1, filename = paste0(results_dir, "table_1.tex"))

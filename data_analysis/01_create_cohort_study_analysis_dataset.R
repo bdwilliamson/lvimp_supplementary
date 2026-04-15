@@ -7,9 +7,8 @@ library("glmnet")
 library("vimp") # for stratified CV
 
 # read in the dataset ----------------------------------------------------------
-# this requires a big memory VM (*not* personal VM. Venti works, Grande ??)
-data_dir <- "G:/CTRHS/IMATS/Data/SRS3 IMATS data/"
-results_dir <- "G:/CTRHS/IMATS/Brian/longitudinal_vim/results/data_analysis/"
+data_dir <- "<the directory where the data are stored>"
+results_dir <- "<the directory where results are stored>"
 load(paste0(data_dir, "imats_srs3.Rdata"))
 clean_srs3 <- imats_srs3 %>%
   clean_names()

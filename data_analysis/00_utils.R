@@ -29,12 +29,14 @@ get_all_learner_preds <- function(cv_sl = NULL, learners = "SL", perf_obj = NULL
 # @param alpha the type I error rate
 # @param K the number of CV folds (for VIM estimation)
 # @param complete_obs for longitudinal VIMs: the observations that are available at *all* timepoints
+# @param cutoff_prob the probability for cutoffs (PPV, sensitivity)
 # @return a list with estimated VIMs for each algorithm
 get_all_vims <- function(y = NULL, x = NULL, full_preds = NULL,
                          reduced_preds = NULL, var_set = 1, 
                          measure_type = "auc", cv_folds = rep(1, length(y)),
                          ss_folds = rep(1, length(y)), alpha = 0.05, K = 1,
-                         complete_obs = rep(1, length(y))) {
+                         complete_obs = rep(1, length(y)), 
+                         cutoff_prob = 0.95, ...) {
   cv_vim_list <- lapply(as.list(1:length(full_preds)), function(k) {
     if (all(is.na(full_preds[[k]])) | all(is.na(reduced_preds[[k]]))) {
       this_vim <- list("s" = var_set, "est" = NA, "naive" = NA,
@@ -49,12 +51,21 @@ get_all_vims <- function(y = NULL, x = NULL, full_preds = NULL,
                        ), "scale" = "identity", "alpha" = 0.05)
       class(this_vim) <- c("vim", "list")
     } else {
+      cutoff <- c(quantile(full_preds[[k]], cutoff_prob), quantile(reduced_preds[[k]], cutoff_prob))
+      reduced_nums <- unlist(sapply(1:10, function(x) sum(reduced_preds[[k]][cv_folds == x] >= cutoff[2])))
+      cutoff_prob_2 <- cutoff_prob - 0.05
+      # ensure that we have some folds with predictions above the threshold
+      while (sum(reduced_nums != 0) < 5) {
+        cutoff[2] <- quantile(reduced_preds[[k]], cutoff_prob_2)
+        cutoff_prob_2 <- cutoff_prob_2 - 0.05
+        reduced_nums <- unlist(sapply(1:10, function(x) sum(reduced_preds[[k]][cv_folds == x] >= cutoff[2])))
+      }
       this_vim <- vimp::cv_vim(Y = y, X = x, cross_fitted_f1 = full_preds[[k]],
                                cross_fitted_f2 = reduced_preds[[k]],
                                indx = var_set, type = measure_type,
-                               cross_fitting_folds = cv_folds, ss_folds = ss_folds,
+                               cross_fitting_folds = cv_folds, sample_splitting_folds = ss_folds,
                                run_regression = FALSE, alpha = alpha,
-                               V = K, na.rm = TRUE)
+                               V = K, na.rm = TRUE, cutoff = cutoff, ...)
       fixed_se <- vimp::vimp_se(
         eif_full = lapply(this_vim$all_eifs_full, function(eif) eif[complete_obs]),
         eif_reduced = lapply(this_vim$all_eifs_redu, function(eif) eif[complete_obs]),
@@ -77,7 +88,7 @@ get_all_vims <- function(y = NULL, x = NULL, full_preds = NULL,
     }
     this_alg_full <- names(full_preds)[k]
     this_alg_reduced <- names(reduced_preds)[k]
-    tibble("full" = this_alg_full, "reduced" = this_alg_reduced, "vim" = this_vim)
+    tibble("full" = this_alg_full, "reduced" = this_alg_reduced, "vim" = this_vim, "type" = measure_type)
   })
   return(cv_vim_list)
 }
@@ -86,24 +97,30 @@ get_all_vims <- function(y = NULL, x = NULL, full_preds = NULL,
 # @param cv_vims a list of CV VIM estimates
 # @param num_timepoints the number of timepoints
 # @return longitudinal VIM summaries!
-get_all_lvims <- function(cv_vims = NULL, num_timepoints = 4) {
+get_all_lvims <- function(cv_vims = NULL, num_timepoints = 4, metrics = "auc") {
   K <- length(cv_vims)
   num_varsets <- length(cv_vims[[1]])
-  lvim_list <- vector("list", length = K)
-  # outer loop over algorithms
-  for (k in seq_len(K)) {
-    lvim_list[[k]] <- vector("list", length = num_varsets)
-    # inner loop over variable sets
-    for (j in seq_len(num_varsets)) {
-      this_vim_list <- lapply(cv_vims[[k]][[j]], function(l) l$vim)
-      this_full_alg <- unlist(lapply(cv_vims[[k]][[j]], function(l) l$full[1]))
-      this_reduced_alg <- unlist(lapply(cv_vims[[k]][[j]], function(l) l$reduced[1]))
-      lvim_obj <- lvimp::lvim(this_vim_list, timepoints = 1:num_timepoints)
-      lvim_list[[k]][[j]] <- lvimp::lvim_average(lvim_obj, indices = 1:num_timepoints)
-      lvim_list[[k]][[j]] <- lvimp::lvim_trend(lvim_list[[k]][[j]], indices = 1:num_timepoints)
-      lvim_list[[k]][[j]] <- lvimp::lvim_autc(lvim_list[[k]][[j]], indices = 1:num_timepoints)    
-    }
+  # first loop over metrics
+  lvim_list <- vector("list", length = length(metrics)) 
+  for (m in 1:length(metrics)) {
+    lvim_list[[m]] <- vector("list", length = K)
+    # outer loop over algorithms
+    for (k in seq_len(K)) {
+      lvim_list[[m]][[k]] <- vector("list", length = num_varsets)
+      # inner loop over variable sets
+      for (j in seq_len(num_varsets)) {
+        this_vim_list <- lapply(cv_vims[[k]][[j]][[m]], function(l) l$vim)
+        this_full_alg <- unlist(lapply(cv_vims[[k]][[j]][[m]], function(l) l$full[1]))
+        this_reduced_alg <- unlist(lapply(cv_vims[[k]][[j]][[m]], function(l) l$reduced[1]))
+        this_type <- unlist(lapply(reordered_cv_vim_list[[k]][[j]][[m]], function(l) l$type[1]))
+        lvim_obj <- lvimp::lvim(this_vim_list, timepoints = 1:num_timepoints)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_average(lvim_obj, indices = 1:num_timepoints)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_trend(lvim_list[[m]][[k]][[j]], indices = 1:num_timepoints)
+        lvim_list[[m]][[k]][[j]] <- lvimp::lvim_autc(lvim_list[[m]][[k]][[j]], indices = 1:num_timepoints)    
+      }
+    }  
   }
+  
   return(lvim_list)
 }
 
@@ -256,7 +273,7 @@ get_nice_varset <- function(varset_num, varsets) {
 # @param use_paper_numbering should we use paper numbering or original numbering?
 # @return a ggplot object with the trajectory plotted over time
 plot_trajectory <- function(output, varset = 1, est_type = "predictiveness",
-                            use_paper_numbering = TRUE) {
+                            use_paper_numbering = TRUE, metric = "AUC") {
   if (use_paper_numbering) {
     this_output <- output %>% 
       filter(paper_varset_num %in% varset, grepl(est_type, designation) & !grepl("-[average|trend|autc]", designation)) %>% 
@@ -283,7 +300,7 @@ plot_trajectory <- function(output, varset = 1, est_type = "predictiveness",
     geom_errorbar(aes(ymin = cil, ymax = ciu), position = position_dodge(width = 0.5)) +
     scale_color_viridis_d(begin = 0, end = 0.75) +
     ggtitle(paste0(toupper(est_type), " TRAJECTORY")) +
-    labs(shape = "Algorithm", x = "Time point", y = "AUC") +
+    labs(shape = "Algorithm", x = "Time point", y = metric) +
     theme(legend.position = "bottom", legend.direction = "horizontal") +
     guides(shape = guide_legend(nrow = 2)) +
     ylim(y_lim)
@@ -323,9 +340,11 @@ create_overall_table <- function(output, varset = 1, est_type = "predictiveness"
       mutate(est = round(est, digits), cil = round(cil, digits))
   }
   nice_output <- nice_output %>% 
-    mutate(ciu = round(ciu, digits),
-           ci = paste0("[", cil, ", ", ciu, "]"),
-           p_value = ifelse(p_value < 0.001, "< 0.001", as.character(round(p_value, digits)))) %>% 
+    mutate(est = ifelse(is.na(est), "---", as.character(est)),
+           se = ifelse(is.na(se), "---", as.character(se)),
+           ciu = round(ciu, digits),
+           ci = ifelse(is.na(ciu), "---", paste0("[", cil, ", ", ciu, "]")),
+           p_value = ifelse(is.na(p_value), "---", ifelse(p_value < 0.001, "< 0.001", as.character(round(p_value, digits))))) %>% 
     arrange(measure, varset_fct, algo_fct) %>% 
     select(measure, nice_varset, algo, est, se, ci, p_value) %>% 
     rename(Algorithm = algo, `Point Estimate` = est, `SE` = se, `95% CI` = ci,
